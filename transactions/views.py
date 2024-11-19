@@ -4,14 +4,27 @@ from django.conf import settings
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-
+from django.core.cache import cache
 from .models import Transaction
 from .serializers import TransactionSerializer
+import logging
 
+logger = logging.getLogger(__name__)
 
 def get_exchange_rate_url(base_url, api_key, input_currency, output_currency):
     return f"{base_url}/{api_key}/pair/{input_currency}/{output_currency}"
 
+def fetch_data_from_api(url):
+    try:
+        response = requests.get(url, verify=False, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        logger.error(f"API request error: {str(e)}")
+        raise
+    except ValueError:
+        logger.error("Invalid JSON response from API")
+        raise
 
 class TransactionCreateView(generics.CreateAPIView):
     queryset = Transaction.objects.all()
@@ -23,61 +36,39 @@ class TransactionCreateView(generics.CreateAPIView):
         output_currency = request.data.get('output_currency')
         input_amount = request.data.get('input_amount')
 
-        # Validate required fields
-        if not input_currency or not output_currency or not input_amount:
-            return Response({"error": "Missing required fields: input_currency, output_currency, input_amount"},
-                            status=status.HTTP_400_BAD_REQUEST)
+        if not all([input_currency, output_currency, input_amount]):
+            return Response({"error": "Missing required fields"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Convert input amount to Decimal for precision
         try:
             input_amount = Decimal(input_amount)
         except InvalidOperation:
-            return Response({"error": "Invalid input amount. Please provide a valid number."},
-                             status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Invalid input amount"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Fetch exchange rate
-        url = get_exchange_rate_url(settings.EXCHANGE_RATE_API_URL, settings.EXCHANGE_RATE_API_KEY, input_currency, output_currency)
-        response = requests.get(url, verify=False)
-
-        if response.status_code != 200:
-            return Response(
-                {"error": f"Failed to fetch exchange rate: {response.text}"},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-        # Parse exchange rate data
         try:
-            exchange_rate_data = response.json()
-            exchange_rate = exchange_rate_data.get('conversion_rate')
-        except ValueError:
-            return Response({"error": "Invalid response from exchange rate API"},
-                            status=status.HTTP_502_BAD_GATEWAY)
+            url = get_exchange_rate_url(
+                settings.EXCHANGE_RATE_API_URL,
+                settings.EXCHANGE_RATE_API_KEY,
+                input_currency,
+                output_currency
+            )
+            exchange_rate = fetch_data_from_api(url).get('conversion_rate')
+            if exchange_rate is None:
+                raise ValueError("Exchange rate missing in API response")
+        except Exception as e:
+            logger.error(f"Exchange rate API error: {str(e)}")
+            return Response({"error": "Failed to fetch exchange rate"}, status=status.HTTP_502_BAD_GATEWAY)
 
-        # Check if exchange rate is available
-        if exchange_rate is None:
-            return Response({"error": "Exchange rate not available"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Calculate the output amount
-        output_amount = input_amount * Decimal(exchange_rate)
-
-        # Round output_amount to 2 decimal places
-        output_amount = output_amount.quantize(Decimal('0.01'))
-
-        # Check for total digit length (max 15 digits in total)
+        output_amount = (input_amount * Decimal(exchange_rate)).quantize(Decimal('0.01'))
         if len(str(output_amount).replace('.', '')) > 15:
-            return Response({"error": "Output amount exceeds the allowed precision limit of 15 digits."},
-                             status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Output amount exceeds precision limit"}, status=status.HTTP_400_BAD_REQUEST)
 
-        request.data['output_amount'] = str(output_amount)  # Ensure it's a string for API processing
-
+        request.data['output_amount'] = str(output_amount)
         return super().create(request, *args, **kwargs)
 
-
 class TransactionListView(generics.ListAPIView):
-    queryset = Transaction.objects.all()
+    queryset = Transaction.objects.select_related('user')
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
-
 
 class TransactionDetailView(generics.RetrieveAPIView):
     queryset = Transaction.objects.all()
@@ -85,24 +76,21 @@ class TransactionDetailView(generics.RetrieveAPIView):
     lookup_field = 'id'
     permission_classes = [IsAuthenticated]
 
-
 class AvailableCurrenciesListView(generics.ListAPIView):
     def get(self, request, *args, **kwargs):
         url = f"{settings.EXCHANGE_RATE_API_URL}/{settings.EXCHANGE_RATE_API_KEY}/latest/USD"
-        response = requests.get(url, verify=False)
- 
-        if response.status_code != 200:
-            return Response(
-                {"error": f"Failed to fetch currencies: {response.text}"},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
+
+        cached_data = cache.get('available_currencies')
+        if cached_data:
+            return Response(cached_data, status=status.HTTP_200_OK)
 
         try:
-            currencies_data = response.json()
-        except ValueError:
+            data = fetch_data_from_api(url)
+            cache.set('available_currencies', data, timeout=3600)
+        except Exception:
             return Response(
-                {"error": "Invalid response from exchange rate API"},
-                status=status.HTTP_502_BAD_GATEWAY
+                {"error": "Failed to fetch currencies from external API"},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        return Response(currencies_data, status=status.HTTP_200_OK)
+        return Response(data, status=status.HTTP_200_OK)
