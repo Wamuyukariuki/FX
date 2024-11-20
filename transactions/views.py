@@ -48,6 +48,9 @@ class TransactionCreateView(generics.CreateAPIView):
         output_currency = request.data.get('output_currency')
         input_amount = request.data.get('input_amount')
 
+        # Validate using the serializer
+        serializer = self.get_serializer(data=request.data)
+
         if not all([input_currency, output_currency, input_amount]):
             return Response({
                 "data": {},
@@ -68,12 +71,25 @@ class TransactionCreateView(generics.CreateAPIView):
                 "success": False
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Automatically add the customer_id from the logged-in user
+        if not request.user.is_authenticated:
+            return Response({
+                "data": {},
+                "errors": {"message": "Authentication required"},
+                "status": status.HTTP_401_UNAUTHORIZED,
+                "message": "User is not authenticated.",
+                "success": False
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        request.data['customer_id'] = request.user.id
+
         # Generate a unique cache key for the currency pair
         cache_key = f"exchange_rate_{input_currency.upper()}_{output_currency.upper()}"
 
         # Start timer to track cache retrieval time
         cache_start_time = time.time()
 
+        # Check cache for exchange rate first
         exchange_rate = cache.get(cache_key)
 
         # Log cache hit/miss and time taken
@@ -84,6 +100,7 @@ class TransactionCreateView(generics.CreateAPIView):
         else:
             logger.info(f"Cache miss for {cache_key}. Time taken: {cache_time_taken:.4f} seconds.")
 
+        # If exchange rate is not found in cache, make the API call
         if exchange_rate is None:
             try:
                 url = get_exchange_rate_url(
@@ -115,6 +132,7 @@ class TransactionCreateView(generics.CreateAPIView):
                     "success": False
                 }, status=status.HTTP_502_BAD_GATEWAY)
 
+        # Calculate the output amount
         output_amount = (input_amount * Decimal(exchange_rate)).quantize(Decimal('0.01'))
         if len(str(output_amount).replace('.', '')) > 15:
             return Response({
@@ -126,8 +144,18 @@ class TransactionCreateView(generics.CreateAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         request.data['output_amount'] = str(output_amount)
-        return super().create(request, *args, **kwargs)
 
+        # Ensure customer_id is in request data
+        if 'customer_id' not in request.data:
+            return Response({
+                "data": {},
+                "errors": {"message": "customer_id is required"},
+                "status": status.HTTP_400_BAD_REQUEST,
+                "message": "Please provide the customer_id.",
+                "success": False
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().create(request, *args, **kwargs)
 
 # List transactions
 class TransactionListView(generics.ListAPIView):
@@ -171,11 +199,19 @@ class TransactionDetailView(generics.RetrieveAPIView):
 # List available currencies with Redis cache
 class AvailableCurrenciesListView(generics.ListAPIView):
     def get(self, request, *args, **kwargs):
+        # Define the cache key and URL for the API request
+        cache_key = 'available_currencies'
         url = f"{settings.EXCHANGE_RATE_API_URL}/{settings.EXCHANGE_RATE_API_KEY}/latest/USD"
 
-        # Try to fetch data from cache first
-        cached_data = cache.get('available_currencies')
+        # Check if the available currencies are in the cache
+        cache_start_time = time.time()  # Track cache retrieval time
+        cached_data = cache.get(cache_key)
+
+        # Log the cache hit or miss
+        cache_end_time = time.time()
+        cache_time_taken = cache_end_time - cache_start_time
         if cached_data:
+            logger.info(f"Cache hit for {cache_key}. Time taken: {cache_time_taken:.4f} seconds.")
             return Response({
                 "data": cached_data,
                 "errors": {},
@@ -183,13 +219,22 @@ class AvailableCurrenciesListView(generics.ListAPIView):
                 "message": "Available currencies fetched from cache.",
                 "success": True
             }, status=status.HTTP_200_OK)
+        else:
+            logger.info(f"Cache miss for {cache_key}. Time taken: {cache_time_taken:.4f} seconds.")
 
-        # Fetch data from API if cache is empty
+        # Fetch data from the API if cache is empty
         try:
+            # Fetch the data from the external API
+            api_start_time = time.time()  # Track API call time
             data = fetch_data_from_api(url)
-            # Store the fetched data in Redis cache for 1 hour
-            cache.set('available_currencies', data, timeout=3600)
-        except Exception:
+            api_end_time = time.time()
+            api_time_taken = api_end_time - api_start_time
+            logger.info(f"API request for {cache_key} took {api_time_taken:.4f} seconds.")
+
+            # Store the fetched data in the cache for 1 hour
+            cache.set(cache_key, data, timeout=3600)
+        except Exception as e:
+            logger.error(f"Failed to fetch available currencies from API: {str(e)}")
             return Response({
                 "data": {},
                 "errors": {"message": "Failed to fetch currencies from external API"},
@@ -198,6 +243,7 @@ class AvailableCurrenciesListView(generics.ListAPIView):
                 "success": False
             }, status=status.HTTP_502_BAD_GATEWAY)
 
+        # Return the data fetched from the API
         return Response({
             "data": data,
             "errors": {},
