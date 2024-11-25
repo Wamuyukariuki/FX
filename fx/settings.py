@@ -10,7 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 import os
-
+from decouple import config
 import redis
 from pathlib import Path
 from datetime import timedelta
@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-=s160hbpbfpe-h8*++=s&#-1(91_93svqh*$!7f(u4-*d!lx$7'
+SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -46,19 +46,18 @@ INSTALLED_APPS = [
     'transactions',
 ]
 
-# Add JWT authentication to the Django REST Framework configuration
+
+# DRF Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
 }
 
-# Import Simple JWT's token lifetime settings,
-
-
+# JWT Token Settings
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(seconds=int(os.getenv('ACCESS_TOKEN_LIFETIME', 3600))),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('REFRESH_TOKEN_LIFETIME', 1))),
+    'ACCESS_TOKEN_LIFETIME': timedelta(seconds=config('ACCESS_TOKEN_LIFETIME', cast=int, default=3600)),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=config('REFRESH_TOKEN_LIFETIME', cast=int, default=1)),
 }
 
 
@@ -146,14 +145,16 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 
-EXCHANGE_RATE_API_KEY = '1527f9730167ea15a23bf350'
-EXCHANGE_RATE_API_URL = 'https://v6.exchangerate-api.com/v6'
+
+
+EXCHANGE_RATE_API_URL = config('EXCHANGE_RATE_API_URL')
+EXCHANGE_RATE_API_KEY = config('EXCHANGE_RATE_API_KEY')
 
 
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://:mvIoGjDkFvFoy2Qqj0cILkQaEfZHWrTy@redis-11612.c282.east-us-mz.azure.redns.redis-cloud.com:11612/0',
+        'LOCATION': config('REDIS_URL'),
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
         }
@@ -175,7 +176,7 @@ LOGGING = {
             'level': 'INFO',
             'propagate': True,
         },
-        # Custom logger for your app
+        # Custom logger
         'transactions': {
             'handlers': ['console'],
             'level': 'INFO',
